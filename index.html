@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Stream with WebGL</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        background-color: black;
+      }
+      canvas {
+        display: block;
+        max-width: 100%;
+        max-height: 100%;
+      }
+      video {
+        display: none; /* Hide the raw video element */
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  </head>
+  <body>
+    <canvas id="webglCanvas"></canvas>
+    <video id="hlsVideo" controls playsinline muted></video>
+    <script type="module">
+      import { vertexShaderSource, fragmentShaderSource } from "./shaders.js";
+
+      const canvas = document.getElementById("webglCanvas");
+      const video = document.getElementById("hlsVideo");
+      let gl;
+
+      // Initialize WebGL
+      try {
+        gl = canvas.getContext("webgl2");
+        if (!gl) {
+          gl =
+            canvas.getContext("webgl") ||
+            canvas.getContext("experimental-webgl");
+          if (!gl) {
+            throw "WebGL is not supported";
+          }
+        }
+      } catch (e) {
+        console.error("WebGL initialization failed:", e);
+      }
+
+      let hls;
+      let hlsLoaded = false;
+
+      // Video event listeners
+      video.addEventListener("error", (e) => {
+        console.error("Video Error:", video.error);
+      });
+
+      video.addEventListener("loadedmetadata", () => {
+        console.log(
+          "Video metadata loaded:",
+          video.videoWidth,
+          "x",
+          video.videoHeight
+        );
+      });
+
+      video.addEventListener("playing", () => {
+        console.log("Video is playing");
+        // Update canvas size if needed
+        if (
+          canvas.width !== video.videoWidth ||
+          canvas.height !== video.videoHeight
+        ) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        hlsLoaded = true;
+      });
+
+      function handleHlsSetup(playlistUrl) {
+        if (Hls.isSupported()) {
+          hls = new Hls({
+            debug: false,
+            enableWorker: true,
+          });
+
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            console.log("Manifest parsed, playing");
+            video.play().catch((e) => console.error("Error playing video:", e));
+          });
+
+          // Load the HLS manifest
+          const fullUrl = window.location.origin + playlistUrl;
+          console.log("Loading HLS manifest from:", fullUrl);
+          hls.loadSource(fullUrl);
+
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+              switch (data.type) {
+                case Hls.ErrorTypes.NETWORK_ERROR:
+                  console.error("Network error:", data);
+                  hls.startLoad();
+                  break;
+                case Hls.ErrorTypes.MEDIA_ERROR:
+                  console.error("Media error:", data);
+                  hls.recoverMediaError();
+                  break;
+                default:
+                  console.error("Fatal error:", data);
+                  break;
+              }
+            }
+          });
+        } else {
+          console.error("HLS.js is not supported in this browser");
+        }
+      }
+
+      // WebGL setup
+      function createShader(gl, type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          console.error(
+            "Shader compilation error:",
+            gl.getShaderInfoLog(shader)
+          );
+          gl.deleteShader(shader);
+          return null;
+        }
+        return shader;
+      }
+
+      function createProgram(gl, vertexShader, fragmentShader) {
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          console.error(
+            "Program linking error:",
+            gl.getProgramInfoLog(program)
+          );
+          gl.deleteProgram(program);
+          return null;
+        }
+        return program;
+      }
+
+      // Initialize WebGL program
+      const vertexShader = createShader(
+        gl,
+        gl.VERTEX_SHADER,
+        vertexShaderSource
+      );
+      const fragmentShader = createShader(
+        gl,
+        gl.FRAGMENT_SHADER,
+        fragmentShaderSource
+      );
+      const program = createProgram(gl, vertexShader, fragmentShader);
+
+      // Get attribute and uniform locations
+      const positionAttributeLocation = gl.getAttribLocation(
+        program,
+        "a_position"
+      );
+      const texCoordAttributeLocation = gl.getAttribLocation(
+        program,
+        "a_texCoord"
+      );
+      const textureUniformLocation = gl.getUniformLocation(
+        program,
+        "u_texture"
+      );
+
+      // Create and set up buffers
+      const positionBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+      const positions = [-1, 1, 1, 1, -1, -1, 1, -1];
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array(positions),
+        gl.STATIC_DRAW
+      );
+
+      const texCoordBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+      const texCoords = [0, 0, 1, 0, 0, 1, 1, 1];
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array(texCoords),
+        gl.STATIC_DRAW
+      );
+
+      // Create and set up texture
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+      // Set up GL state
+      gl.useProgram(program);
+      gl.uniform1i(textureUniformLocation, 0);
+
+      function render() {
+        if (hlsLoaded && video.readyState === 4) {
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            video
+          );
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+          gl.enableVertexAttribArray(positionAttributeLocation);
+          gl.vertexAttribPointer(
+            positionAttributeLocation,
+            2,
+            gl.FLOAT,
+            false,
+            0,
+            0
+          );
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+          gl.enableVertexAttribArray(texCoordAttributeLocation);
+          gl.vertexAttribPointer(
+            texCoordAttributeLocation,
+            2,
+            gl.FLOAT,
+            false,
+            0,
+            0
+          );
+
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        requestAnimationFrame(render);
+      }
+
+      // Start the render loop
+      render();
+
+      // Fetch and set up the stream
+      const streamUrl = `http://localhost:3000/stream?url=https://www.youtube.com/watch?v=VUJbDTIYlM4`;
+
+      fetch(streamUrl)
+        .then((response) => {
+          if (!response.ok)
+            throw new Error(`HTTP error! status: ${response.status}`);
+          return response.json();
+        })
+        .then((data) => {
+          console.log("Retrieved stream data:", data);
+          if (data.playlistUrl) {
+            handleHlsSetup(data.playlistUrl);
+          } else {
+            throw new Error("No playlist URL in response");
+          }
+        })
+        .catch((error) => {
+          console.error("Stream setup failed:", error);
+        });
+    </script>
+  </body>
+</html>
